@@ -22,8 +22,6 @@ def extract_law_articles(text: str) -> List[Dict[str, str]]:
         r'(?:^|[\s"\'\(\[|])([가-힣]+조례)\s*(?:\[[^\]]*\]\s*)*제\s*(\d+)\s*조',
         r'(?:^|[\s"\'\(\[|])([가-힣]+규칙)\s*(?:\[[^\]]*\]\s*)*제\s*(\d+)\s*조',
         r"부칙\s*(?:\[[^\]]*\]\s*)*제\s*(\d+)\s*조",
-        r"별표\s*(?:\[[^\]]*\]\s*)*(\d+)",
-        r"별지\s*(?:\[[^\]]*\]\s*)*(\d+)",
     ]
 
     found_articles = []
@@ -78,12 +76,6 @@ def extract_law_articles(text: str) -> List[Dict[str, str]]:
             article_num = match.group(2)
         elif pattern.startswith("부칙"):
             law_name = "부칙"
-            article_num = match.group(1)
-        elif pattern.startswith("별표"):
-            law_name = "별표"
-            article_num = match.group(1)
-        elif pattern.startswith("별지"):
-            law_name = "별지"
             article_num = match.group(1)
         else:
             law_name = match.group(1).strip() if match.group(1) else ""
