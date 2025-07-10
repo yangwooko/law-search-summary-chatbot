@@ -7,8 +7,15 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from tavily import TavilyClient
 from dotenv import load_dotenv
 
+# LLM용
+from openai import OpenAI
+
 # 로컬 모듈 import
-from law_article_extractor import extract_law_articles
+from law_article_extractor import (
+    extract_law_articles,
+    extract_all_articles_with_references,
+    extract_referenced_articles,
+)
 from law_content_fetcher import LawContentFetcher
 
 load_dotenv()
@@ -20,6 +27,12 @@ class LawSearchIntegrated:
     def __init__(self):
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
         self.law_fetcher = LawContentFetcher()
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openai_model = os.getenv("OPENAI_MODEL")
+        if self.openai_api_key:
+            self.openai_client = OpenAI(api_key=self.openai_api_key)
+        else:
+            self.openai_client = None
 
     def tavily_search(
         self, query: str, domains: List[str] | None = None, num_results: int = 5
@@ -86,7 +99,7 @@ class LawSearchIntegrated:
     async def crawl_and_extract_laws(
         self, query: str, domains: List[str] | None = None, num_results: int = 5
     ) -> Dict[str, Any]:
-        """검색 → 크롤링 → 법령 추출 → 조문 내용 가져오기 통합 처리"""
+        """검색 → 크롤링 → 법령 추출 → 조문 내용 가져오기 + LLM 답변"""
 
         print(f"🔍 검색 시작: '{query}'")
 
@@ -101,6 +114,7 @@ class LawSearchIntegrated:
                 "crawled_content": "",
                 "extracted_laws": [],
                 "law_contents": [],
+                "llm_answer": None,
             }
 
         print(f"📄 {len(urls)}개의 URL을 크롤링합니다.")
@@ -115,6 +129,20 @@ class LawSearchIntegrated:
             exclude_social_media_links=True,
             exclude_all_images=True,
         )
+
+        # Crawl4AI 로그 출력 억제
+        import logging
+        import sys
+
+        # 모든 로그 레벨을 ERROR로 설정
+        logging.getLogger().setLevel(logging.ERROR)
+        logging.getLogger("crawl4ai").setLevel(logging.ERROR)
+        logging.getLogger("urllib3").setLevel(logging.ERROR)
+        logging.getLogger("requests").setLevel(logging.ERROR)
+
+        # 표준 출력 리다이렉션 (임시)
+        original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
 
         async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as crawler:
             for i, url in enumerate(urls, 1):
@@ -154,7 +182,7 @@ class LawSearchIntegrated:
                         if markdown_content:
                             cleaned_text = self.clean_markdown_text(markdown_content)
                             all_text += f"\n\n--- {url} ---\n\n{cleaned_text}"
-                            print(f"DEBUG: 텍스트 추출 성공, 길이: {len(cleaned_text)}")
+                            # print(f"DEBUG: 텍스트 추출 성공, 길이: {len(cleaned_text)}")
                         else:
                             print(f"크롤링 결과에서 텍스트를 추출할 수 없습니다: {url}")
                     except Exception as e:
@@ -168,6 +196,10 @@ class LawSearchIntegrated:
                 # 요청 간격 조절
                 time.sleep(1)
 
+        # 표준 출력 복원
+        sys.stdout.close()
+        sys.stdout = original_stdout
+
         if not all_text.strip():
             return {
                 "success": False,
@@ -176,26 +208,129 @@ class LawSearchIntegrated:
                 "crawled_content": "",
                 "extracted_laws": [],
                 "law_contents": [],
+                "llm_answer": None,
             }
 
         print(f"📝 크롤링 완료: {len(all_text)} 문자")
 
-        # 3. 법령명과 조문번호 추출
+        # 3. 법령명과 조문번호 추출 (직접 언급 + 참조)
         print("🔍 법령명과 조문번호 추출 중...")
-        extracted_laws = extract_law_articles(all_text)
 
-        print(f"📋 추출된 법령: {len(extracted_laws)}개")
-        for i, law in enumerate(extracted_laws, 1):
-            print(f"  {i}. {law['law_name']} 제{law['article_num']}조")
+        # 첫 번째로 발견된 법령명을 기준으로 참조 조항도 추출
+        initial_laws = extract_law_articles(all_text)
+        current_law_name = None
+        if initial_laws:
+            current_law_name = initial_laws[0]["law_name"]
+            print(f"📋 기준 법령: {current_law_name}")
+
+        # 직접 언급된 조항과 참조 조항 모두 추출
+        all_extracted = extract_all_articles_with_references(all_text, current_law_name)
+        extracted_laws = all_extracted["all_articles"]
+        direct_laws = all_extracted["direct_articles"]
+        referenced_laws = all_extracted["referenced_articles"]
+
+        print(
+            f"📋 추출된 법령: {len(extracted_laws)}개 (직접: {len(direct_laws)}개, 참조: {len(referenced_laws)}개)"
+        )
+        for i, law in enumerate(direct_laws, 1):
+            print(f"  {i}. {law['law_name']} 제{law['article_num']}조 (직접 언급)")
+        for i, law in enumerate(referenced_laws, 1):
+            print(
+                f"  {len(direct_laws) + i}. {law['law_name']} 제{law['article_num']}조 (참조)"
+            )
 
         # 4. 추출된 법령의 조문 내용 가져오기
         law_contents = []
         if extracted_laws:
             print("📖 조문 내용 가져오기 중...")
-            print(f"DEBUG: extracted_laws: {extracted_laws}")
+            # print(f"DEBUG: extracted_laws: {extracted_laws}")
             law_contents = await self.law_fetcher.fetch_law_articles_content(
                 extracted_laws
             )
+
+            # 5. 조문 내용에서 추가 참조 조항 추출
+            additional_references = []
+            for content_result in law_contents:
+                if (
+                    content_result.get("content", {}).get("success")
+                    and current_law_name
+                ):
+                    content_text = content_result["content"]["content"].get(
+                        "content", ""
+                    )
+                    if content_text:
+                        # 조문 내용에서 참조 추출
+                        content_refs = extract_referenced_articles(
+                            content_text, current_law_name
+                        )
+                        additional_references.extend(content_refs)
+
+            # 중복 제거
+            unique_additional_refs = []
+            seen_keys = set()
+            for ref in additional_references:
+                if ref["key"] not in seen_keys:
+                    unique_additional_refs.append(ref)
+                    seen_keys.add(ref["key"])
+
+            if unique_additional_refs:
+                print(
+                    f"📋 조문 내용에서 추가 참조 발견: {len(unique_additional_refs)}개"
+                )
+                for ref in unique_additional_refs:
+                    print(f"  - {ref['law_name']} 제{ref['article_num']}조")
+
+                # 추가 참조 조항을 referenced_laws에 합치기
+                referenced_laws.extend(unique_additional_refs)
+
+                # 추가 참조 조항의 내용도 가져오기
+                additional_contents = await self.law_fetcher.fetch_law_articles_content(
+                    unique_additional_refs
+                )
+                law_contents.extend(additional_contents)
+
+        # 6. RAG용 context 생성 (크롤링+법령 내용)
+        rag_context = all_text
+        for law in law_contents:
+            if law.get("content", {}).get("success"):
+                c = law["content"]["content"].get("content", "")
+                if c:
+                    rag_context += f"\n\n--- 법령 조문 ---\n\n{c}"
+
+        # 7. LLM 답변 생성
+        llm_answer = None
+        if self.openai_client:
+            try:
+                prompt = f"""
+아래는 법령 및 관련 조문 내용입니다. 이 내용을 참고하여 사용자의 질문에 대해 법적 근거와 함께 명확하게 답변해 주세요. 답변은 최대한 법령 내용을 인용하는 방식으로 작성해주세요.
+
+[법령 및 조문]
+{rag_context}
+
+[질문]
+{query}
+
+[답변]
+"""
+                model_name = self.openai_model or "gpt-3.5-turbo-16k"
+                response = self.openai_client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "당신은 법률 전문가입니다."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=800,
+                )
+                llm_answer = (
+                    response.choices[0].message.content.strip()
+                    if response.choices[0].message.content
+                    else None
+                )
+                # print(f"DEBUG: LLM 답변: {llm_answer}")
+            except Exception as e:
+                print(f"LLM 답변 생성 오류: {e}")
+                llm_answer = None
 
         return {
             "success": True,
@@ -204,7 +339,10 @@ class LawSearchIntegrated:
                 all_text[:2000] + "..." if len(all_text) > 2000 else all_text
             ),
             "extracted_laws": extracted_laws,
+            "direct_laws": direct_laws,
+            "referenced_laws": referenced_laws,
             "law_contents": law_contents,
+            "llm_answer": llm_answer,
         }
 
     def get_law_domains(self) -> List[str]:
@@ -235,42 +373,63 @@ class LawSearchIntegrated:
         output = f"# 검색 결과: '{results['search_query']}'\n\n"
 
         # 추출된 법령 요약
-        extracted_laws = results.get("extracted_laws", [])
-        if extracted_laws:
-            output += f"## 📋 발견된 법령 ({len(extracted_laws)}개)\n\n"
-            for i, law in enumerate(extracted_laws, 1):
-                output += f"{i}. **{law['law_name']}** 제{law['article_num']}조\n"
-            output += "\n"
+        direct_laws = results.get("direct_laws", [])
+        referenced_laws = results.get("referenced_laws", [])
+        all_laws = results.get("extracted_laws", [])
 
-        # 조문 내용
-        law_contents = results.get("law_contents", [])
-        if law_contents:
-            output += "## 📖 조문 내용\n\n"
-            for i, result in enumerate(law_contents, 1):
-                original = result["original_article"]
-                content = result["content"]
+        if all_laws:
+            output += f"## 📋 발견된 법령 ({len(all_laws)}개)\n\n"
 
-                print(f"DEBUG: top level content: {content}")
+            # 직접 언급된 법령
+            if direct_laws:
+                output += "### 직접 언급된 법령\n\n"
+                for i, law in enumerate(direct_laws, 1):
+                    output += f"{i}. **{law['law_name']}** 제{law['article_num']}조\n"
+                output += "\n"
 
-                output += (
-                    f"### {i}. {original['law_name']} 제{original['article_num']}조\n\n"
-                )
+            # 참조된 법령
+            if referenced_laws:
+                output += "### 참조된 법령\n\n"
+                for i, law in enumerate(referenced_laws, 1):
+                    ref_type = law.get("reference_type", "참조")
+                    output += f"{i}. **{law['law_name']}** 제{law['article_num']}조 ({ref_type})\n"
+                output += "\n"
 
-                if content.get("success"):
-                    content_data = content.get("content", {})
-                    title = content_data.get("title", "제목 없음")
-                    law_content = content_data.get("content", "내용 없음")
+        # # 조문 내용
+        # law_contents = results.get("law_contents", [])
+        # if law_contents:
+        #     output += "## 📖 조문 내용\n\n"
+        #     for i, result in enumerate(law_contents, 1):
+        #         original = result["original_article"]
+        #         content = result["content"]
 
-                    output += f"**제목**: {title}\n\n"
-                    output += f"**내용**:\n{law_content}\n\n"
-                else:
-                    output += (
-                        f"❌ **오류**: {content.get('error', '알 수 없는 오류')}\n\n"
-                    )
+        #         print(f"DEBUG: top level content: {content}")
 
-                output += "---\n\n"
-        else:
-            output += "## 📖 조문 내용\n\n❌ 조문 내용을 가져올 수 없습니다.\n\n"
+        #         output += (
+        #             f"### {i}. {original['law_name']} 제{original['article_num']}조\n\n"
+        #         )
+
+        #         if content.get("success"):
+        #             content_data = content.get("content", {})
+        #             title = content_data.get("title", "제목 없음")
+        #             law_content = content_data.get("content", "내용 없음")
+
+        #             output += f"**제목**: {title}\n\n"
+        #             output += f"**내용**:\n{law_content}\n\n"
+        #         else:
+        #             output += (
+        #                 f"❌ **오류**: {content.get('error', '알 수 없는 오류')}\n\n"
+        #             )
+
+        #         output += "---\n\n"
+        # else:
+        #     output += "## 📖 조문 내용\n\n❌ 조문 내용을 가져올 수 없습니다.\n\n"
+
+        # LLM 답변
+        llm_answer = results.get("llm_answer")
+        if llm_answer:
+            output += "## 🤖 LLM 답변\n\n"
+            output += llm_answer.strip() + "\n\n"
 
         return output
 

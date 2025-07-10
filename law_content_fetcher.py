@@ -33,7 +33,6 @@ class LawContentFetcher:
 
             # 2. 조문번호를 6자리 형식으로 변환
             jo_num = self._convert_article_to_jo_num(article_num)
-            print(f"converted jo_num: {jo_num}")
 
             # 3. 조문 API 호출
             law_content = await self._get_law_article_by_id(law_id, jo_num)
@@ -177,8 +176,6 @@ class LawContentFetcher:
         """법령 ID와 조문번호로 조문 내용 조회"""
         try:
             law_url = f"https://www.law.go.kr/DRF/lawService.do?OC={self.LAW_ACCESS_OC}&target=lawjosub&type=JSON&ID={law_id}&JO={jo_num}"
-
-            print(f"law_url: {law_url}")
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(law_url) as resp:

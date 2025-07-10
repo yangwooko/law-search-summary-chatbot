@@ -126,3 +126,107 @@ def extract_law_articles(text: str) -> List[Dict[str, str]]:
 
     found_articles.sort(key=lambda x: x["start_pos"])
     return found_articles
+
+
+def extract_referenced_articles(
+    text: str, current_law_name: str
+) -> List[Dict[str, str]]:
+    """
+    텍스트에서 참조하는 조항들을 추출합니다.
+    현재 법령명을 기준으로 "법 제X조" 같은 참조를 해석합니다.
+
+    Args:
+        text: 분석할 텍스트
+        current_law_name: 현재 법령명 (예: "건축법 시행령")
+    Returns:
+        참조된 조항 정보 리스트
+    """
+    if not text or not current_law_name:
+        return []
+
+    # 현재 법령명에서 기본 법령명 추출 (예: "건축법 시행령" -> "건축법")
+    base_law_name = current_law_name
+    if "시행령" in current_law_name:
+        base_law_name = current_law_name.replace(" 시행령", "")
+    elif "시행규칙" in current_law_name:
+        base_law_name = current_law_name.replace(" 시행규칙", "")
+
+    referenced_articles = []
+
+    # 참조 패턴들 (문맥을 고려한 패턴)
+    reference_patterns = [
+        # "법 제X조제Y항제Z호" 패턴 (가장 명확한 참조)
+        r"법\s*제\s*(\d+)\s*조(?:\s*제\s*(\d+)\s*항)?(?:\s*제\s*(\d+)\s*호)?",
+        # "법 제X조제Y항" 패턴
+        r"법\s*제\s*(\d+)\s*조(?:\s*제\s*(\d+)\s*항)?",
+        # "법 제X조" 패턴
+        r"법\s*제\s*(\d+)\s*조",
+    ]
+
+    for pattern in reference_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            article_num = match.group(1)
+            paragraph_num = (
+                match.group(2) if len(match.groups()) > 1 and match.group(2) else None
+            )
+            sub_paragraph_num = (
+                match.group(3) if len(match.groups()) > 2 and match.group(3) else None
+            )
+
+            # 이미 추출된 조항과 중복 확인
+            article_key = f"{base_law_name}_{article_num}"
+            if not any(
+                article["key"] == article_key for article in referenced_articles
+            ):
+                referenced_articles.append(
+                    {
+                        "law_name": base_law_name,
+                        "article_num": article_num,
+                        "paragraph_num": paragraph_num,
+                        "sub_paragraph_num": sub_paragraph_num,
+                        "key": article_key,
+                        "full_text": match.group(0),
+                        "reference_type": "법령참조",
+                        "start_pos": match.start(),
+                        "end_pos": match.end(),
+                    }
+                )
+
+    # 중복 제거 및 정렬
+    unique_articles = []
+    seen_keys = set()
+    for article in referenced_articles:
+        if article["key"] not in seen_keys:
+            unique_articles.append(article)
+            seen_keys.add(article["key"])
+
+    unique_articles.sort(key=lambda x: x["start_pos"])
+    return unique_articles
+
+
+def extract_all_articles_with_references(
+    text: str, current_law_name: str | None = None
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    텍스트에서 직접 언급된 법령 조항과 참조 조항을 모두 추출합니다.
+
+    Args:
+        text: 분석할 텍스트
+        current_law_name: 현재 법령명 (참조 해석용)
+    Returns:
+        직접 언급된 조항과 참조 조항을 포함한 딕셔너리
+    """
+    # 직접 언급된 법령 조항 추출
+    direct_articles = extract_law_articles(text)
+
+    # 참조 조항 추출 (현재 법령명이 있는 경우)
+    referenced_articles = []
+    if current_law_name:
+        referenced_articles = extract_referenced_articles(text, current_law_name)
+
+    return {
+        "direct_articles": direct_articles,
+        "referenced_articles": referenced_articles,
+        "all_articles": direct_articles + referenced_articles,
+    }
