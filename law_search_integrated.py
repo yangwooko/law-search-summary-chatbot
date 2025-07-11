@@ -19,7 +19,7 @@ from law_article_extractor import (
 )
 from law_content_fetcher import LawContentFetcher
 
-load_dotenv(override=True)
+load_dotenv()
 
 
 class LawSearchIntegrated:
@@ -27,6 +27,8 @@ class LawSearchIntegrated:
 
     def __init__(self):
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
+        self.google_cse_api_key = os.getenv("GOOGLE_CSE_API_KEY")
+        self.google_cse_engine_id = os.getenv("GOOGLE_CSE_ENGINE_ID")
         self.law_fetcher = LawContentFetcher()
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.openai_model = os.getenv("OPENAI_MODEL")
@@ -36,63 +38,56 @@ class LawSearchIntegrated:
             self.openai_client = None
 
     def extract_keywords(self, query: str) -> str:
-        """kiwipiepy를 사용하여 질문에서 키워드 추출"""
-        if not self.kiwi:
-            print("⚠️  Kiwi가 초기화되지 않았습니다. 원본 질문을 사용합니다.")
-            return query
-        try:
-            result = self.kiwi.analyze(query)
-            print("kiwipiepy 분석 결과:", result)  # 디버깅용
-            tokens = result[0][0]  # 첫 번째 문장 전체 토큰 리스트
-            keywords = []
+        """질문에서 키워드 추출 (현재는 원본 질문 반환)"""
+        # TODO: 향후 kiwipiepy 등 한국어 형태소 분석기 추가 예정
+        return query
 
-            # 복합어 처리를 위한 임시 저장소
-            temp_keywords = []
+    def _select_best_law_name(self, query: str, laws: List[Dict[str, str]]) -> str:
+        """사용자 질문과 가장 관련성이 높은 법령명을 선택"""
+        if not laws:
+            return ""
 
-            for i, token in enumerate(tokens):
-                print(f"🔍 키워드 추출: '{token}'")
-                # token 타입 확인
-                print(f"🔍 token 타입: {type(token)}")
+        # 질문에서 키워드 추출
+        query_keywords = set(query.replace(" ", "").lower())
 
-                if not isinstance(token, Token):
-                    continue
-                # Token(form='건설', tag='NNG', start=0, len=2)
-                form, tag = token.form, token.tag
-                print(f"🔍 키워드 추출: '{form}'")
-                print(f"🔍 키워드 추출: '{tag}'")
+        best_law = laws[0]  # 기본값
+        best_score = 0
 
-                if isinstance(tag, str) and (
-                    tag.startswith("N") or tag in ["VV", "VA", "XR"]
-                ):
-                    if isinstance(form, str) and len(form) > 0:  # 1글자도 허용
-                        # 복합어 처리: 이전 토큰과 연결되는지 확인
-                        if temp_keywords and i > 0:
-                            prev_token = tokens[i - 1]
-                            if isinstance(prev_token, Token):
-                                # 이전 토큰의 끝 위치가 현재 토큰의 시작 위치와 같으면 연결
-                                if prev_token.start + prev_token.len == token.start:
-                                    # 이전 키워드와 현재 키워드를 합침
-                                    combined = temp_keywords[-1] + form
-                                    temp_keywords[-1] = combined
-                                    print(f"🔍 복합어 생성: '{combined}'")
-                                    continue
+        for law in laws:
+            law_name = law["law_name"]
+            score = 0
 
-                        temp_keywords.append(form)
-                        print(f"🔍 키워드 추가: '{form}'")
+            # 1. 질문에 법령명이 직접 포함되어 있는지 확인
+            if law_name in query:
+                score += 10
 
-            # 최종 키워드 리스트에 추가
-            keywords.extend(temp_keywords)
+            # 2. 법령명의 키워드가 질문에 포함되어 있는지 확인
+            law_keywords = set(law_name.replace(" ", "").lower())
+            common_keywords = query_keywords.intersection(law_keywords)
+            score += len(common_keywords) * 2
 
-            if keywords:
-                extracted_query = " ".join(keywords[:5])
-                print(f"🔍 키워드 추출: '{query}' → '{extracted_query}'")
-                return extracted_query
-            else:
-                print("⚠️  키워드 추출 실패. 원본 질문을 사용합니다.")
-                return query
-        except Exception as e:
-            print(f"⚠️  키워드 추출 중 오류: {e}. 원본 질문을 사용합니다.")
-            return query
+            # 3. 법령명이 짧고 명확한지 확인 (시행령/시행규칙보다는 기본 법령 선호)
+            if "시행령" not in law_name and "시행규칙" not in law_name:
+                score += 3
+            elif "시행령" in law_name:
+                score += 1
+
+            # 4. 법령명이 너무 길지 않은지 확인
+            if len(law_name) <= 10:
+                score += 2
+
+            # 5. 특정 패턴 제외 (잘못된 추출 방지)
+            if any(
+                bad_pattern in law_name
+                for bad_pattern in ["입찰자는", "같은 법", "이 법"]
+            ):
+                score -= 5
+
+            if score > best_score:
+                best_score = score
+                best_law = law
+
+        return best_law["law_name"]
 
     def tavily_search(
         self, query: str, domains: List[str] | None = None, num_results: int = 5
@@ -134,11 +129,17 @@ class LawSearchIntegrated:
             print(f"Tavily 검색 중 오류: {e}")
             return []
 
-    def duckduckgo_search(
+    def google_cse_search(
         self, query: str, domains: List[str] | None = None, num_results: int = 5
     ) -> List[str]:
-        """DuckDuckGo 검색을 사용하여 검색 결과 가져오기 (fallback)"""
+        """Google Custom Search Engine API를 사용하여 검색 결과 가져오기"""
         try:
+            if not self.google_cse_api_key or not self.google_cse_engine_id:
+                print(
+                    "⚠️  GOOGLE_CSE_API_KEY 또는 GOOGLE_CSE_ENGINE_ID 환경변수가 설정되지 않았습니다."
+                )
+                return []
+
             import requests
             from urllib.parse import quote_plus
 
@@ -147,81 +148,66 @@ class LawSearchIntegrated:
             if domains:
                 domain_filter = " ".join([f"site:{domain}" for domain in domains])
                 search_query = f"{query} {domain_filter}"
-                print(f"🔍 DuckDuckGo 검색 - 지정된 도메인: {', '.join(domains)}")
+                print(f"🔍 Google CSE 검색 - 지정된 도메인: {', '.join(domains)}")
 
-            # DuckDuckGo 검색 URL 구성
-            encoded_query = quote_plus(search_query)
-            search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-
-            # User-Agent 설정
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
-                "Accept-Encoding": "gzip, deflate",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
+            # Google CSE API URL 구성
+            base_url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                "key": self.google_cse_api_key,
+                "cx": self.google_cse_engine_id,
+                "q": search_query,
+                "num": min(num_results, 10),  # Google CSE는 최대 10개 결과
             }
 
-            response = requests.get(search_url, headers=headers, timeout=10)
+            response = requests.get(base_url, params=params, timeout=10)
             response.raise_for_status()
 
-            # HTML 저장 (디버그용)
-            with open("ddg_debug.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
-
-            # HTML에서 링크 추출
-            import re
-
+            data = response.json()
             urls = []
 
-            # DuckDuckGo 검색 결과 링크 패턴
-            # DuckDuckGo는 직접 링크를 제공하므로 파싱이 더 간단함
-            link_pattern = (
-                r'<a[^>]*href="([^"]*)"[^>]*class="[^"]*result__a[^"]*"[^>]*>'
-            )
-            matches = re.findall(link_pattern, response.text)
+            if "items" in data:
+                for item in data["items"]:
+                    if "link" in item:
+                        urls.append(item["link"])
+                        if len(urls) >= num_results:
+                            break
 
-            for match in matches:
-                if match.startswith("http") and "duckduckgo.com" not in match:
-                    urls.append(match)
-                    if len(urls) >= num_results:
-                        break
-
-            # 중복 제거
-            unique_urls = []
-            seen = set()
-            for url in urls:
-                if url not in seen:
-                    unique_urls.append(url)
-                    seen.add(url)
-                    if len(unique_urls) >= num_results:
-                        break
-
-            print(f"🔍 DuckDuckGo 검색으로 {len(unique_urls)}개 URL 발견")
-            return unique_urls
+            print(f"🔍 Google CSE 검색으로 {len(urls)}개 URL 발견")
+            return urls
 
         except Exception as e:
-            print(f"DuckDuckGo 검색 중 오류: {e}")
+            print(f"Google CSE 검색 중 오류: {e}")
             return []
 
     def search_urls(
-        self, query: str, domains: List[str] | None = None, num_results: int = 5
+        self,
+        original_query: str,
+        extracted_query: str,
+        domains: List[str] | None = None,
+        num_results: int = 5,
     ) -> List[str]:
-        """Tavily API 또는 DuckDuckGo 검색으로 URL 수집 (fallback 포함)"""
-        # Tavily API 키가 있으면 Tavily 사용
-        if self.tavily_api_key:
-            print("🔍 Tavily API로 검색 중...")
-            urls = self.tavily_search(query, domains, num_results)
+        """Google CSE는 원본 쿼리, Tavily는 추출된 키워드로 검색"""
+        # Google CSE 우선
+        if self.google_cse_api_key and self.google_cse_engine_id:
+            print("🔍 Google CSE API로 검색 중... (원본 쿼리 사용)")
+            urls = self.google_cse_search(original_query, domains, num_results)
             if urls:
                 return urls
             else:
-                print("⚠️  Tavily 검색 실패, DuckDuckGo 검색으로 fallback...")
+                print("⚠️  Google CSE 검색 실패, Tavily API로 fallback...")
 
-        # Tavily가 없거나 실패하면 DuckDuckGo 검색 사용
-        print("🔍 DuckDuckGo 검색으로 검색 중...")
-        return self.duckduckgo_search(query, domains, num_results)
+        # Tavily fallback
+        if self.tavily_api_key:
+            print("🔍 Tavily API로 검색 중... (추출된 키워드 사용)")
+            urls = self.tavily_search(extracted_query, domains, num_results)
+            if urls:
+                return urls
+            else:
+                print("⚠️  Tavily 검색 실패")
+
+        raise ValueError(
+            "검색 API 키가 설정되지 않았습니다. GOOGLE_CSE_API_KEY와 GOOGLE_CSE_ENGINE_ID 또는 TAVILY_API_KEY 중 하나를 설정해주세요."
+        )
 
     def clean_markdown_text(self, text: str) -> str:
         """마크다운 텍스트에서 URL 링크 제거"""
@@ -255,13 +241,24 @@ class LawSearchIntegrated:
         # 1. 키워드 추출
         search_query = self.extract_keywords(query)
 
-        # 2. Tavily 또는 DuckDuckGo 검색으로 URL 수집
-        urls = self.search_urls(search_query, domains, num_results)
+        # 2. Google CSE 또는 Tavily API로 URL 수집
+        try:
+            urls = self.search_urls(query, search_query, domains, num_results)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "search_query": query,
+                "crawled_content": "",
+                "extracted_laws": [],
+                "law_contents": [],
+                "llm_answer": None,
+            }
 
         if not urls:
             return {
                 "success": False,
-                "error": "검색 결과를 가져올 수 없습니다. Tavily API 키와 인터넷 연결을 확인해주세요.",
+                "error": "검색 결과를 가져올 수 없습니다. API 키와 인터넷 연결을 확인해주세요.",
                 "search_query": query,
                 "crawled_content": "",
                 "extracted_laws": [],
@@ -271,8 +268,31 @@ class LawSearchIntegrated:
 
         # 다운로드 링크 필터링
         filtered_urls = []
+        download_patterns = [
+            "flDownload.do",
+            "downloadGet",
+            "download.filespec",
+            "download.savedname",
+            "download.filename",
+            ".hwp",
+            ".pdf",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+            ".zip",
+            ".rar",
+            ".exe",
+            ".msi",
+            ".dmg",
+            ".pkg",
+        ]
+
         for url in urls:
-            if "flDownload.do" not in url:
+            is_download = any(pattern in url.lower() for pattern in download_patterns)
+            if not is_download:
                 filtered_urls.append(url)
             else:
                 print(f"🚫 다운로드 링크 제외: {url}")
@@ -387,81 +407,88 @@ class LawSearchIntegrated:
 
         print(f"📝 크롤링 완료: {len(all_text)} 문자")
 
-        # # 3. 법령명과 조문번호 추출 (직접 언급 + 참조)
-        # print("🔍 법령명과 조문번호 추출 중...")
+        # 3. 법령명과 조문번호 추출 (직접 언급 + 참조)
+        print("🔍 법령명과 조문번호 추출 중...")
 
-        # # 첫 번째로 발견된 법령명을 기준으로 참조 조항도 추출
-        # initial_laws = extract_law_articles(all_text)
-        # current_law_name = None
-        # if initial_laws:
-        #     current_law_name = initial_laws[0]["law_name"]
-        #     print(f"📋 기준 법령: {current_law_name}")
+        # 법령명과 조문번호 추출
+        initial_laws = extract_law_articles(all_text)
+        current_law_name = None
 
-        # # 직접 언급된 조항과 참조 조항 모두 추출
-        # all_extracted = extract_all_articles_with_references(all_text, current_law_name)
-        # extracted_laws = all_extracted["all_articles"]
-        # direct_laws = all_extracted["direct_articles"]
-        # referenced_laws = all_extracted["referenced_articles"]
+        if initial_laws:
+            # 사용자 질문과 가장 관련성이 높은 법령을 기준으로 선택
+            current_law_name = self._select_best_law_name(query, initial_laws)
+            print(f"📋 기준 법령: {current_law_name}")
 
-        # print(
-        #     f"📋 추출된 법령: {len(extracted_laws)}개 (직접: {len(direct_laws)}개, 참조: {len(referenced_laws)}개)"
-        # )
-        # for i, law in enumerate(direct_laws, 1):
-        #     print(f"  {i}. {law['law_name']} 제{law['article_num']}조 (직접 언급)")
-        # for i, law in enumerate(referenced_laws, 1):
-        #     print(
-        #         f"  {len(direct_laws) + i}. {law['law_name']} 제{law['article_num']}조 (참조)"
-        #     )
+            # 디버그: 추출된 모든 법령 출력
+            print(f"🔍 추출된 법령들:")
+            for i, law in enumerate(initial_laws, 1):
+                print(f"  {i}. {law['law_name']} 제{law['article_num']}조")
+
+        # 직접 언급된 조항과 참조 조항 모두 추출
+        all_extracted = extract_all_articles_with_references(all_text, current_law_name)
+        extracted_laws = all_extracted["all_articles"]
+        direct_laws = all_extracted["direct_articles"]
+        referenced_laws = all_extracted["referenced_articles"]
+
+        print(
+            f"📋 추출된 법령: {len(extracted_laws)}개 (직접: {len(direct_laws)}개, 참조: {len(referenced_laws)}개)"
+        )
+        for i, law in enumerate(direct_laws, 1):
+            print(f"  {i}. {law['law_name']} 제{law['article_num']}조 (직접 언급)")
+        for i, law in enumerate(referenced_laws, 1):
+            print(
+                f"  {len(direct_laws) + i}. {law['law_name']} 제{law['article_num']}조 (참조)"
+            )
 
         # 4. 추출된 법령의 조문 내용 가져오기
         law_contents = []
-        # if extracted_laws:
-        #     print("📖 조문 내용 가져오기 중...")
-        #     # print(f"DEBUG: extracted_laws: {extracted_laws}")
-        #     law_contents = await self.law_fetcher.fetch_law_articles_content(
-        #         extracted_laws
-        #     )
+        if extracted_laws:
+            print("📖 조문 내용 가져오기 중...")
+            # print(f"DEBUG: extracted_laws: {extracted_laws}")
+            law_contents = await self.law_fetcher.fetch_law_articles_content(
+                extracted_laws
+            )
 
-        #     # 5. 조문 내용에서 추가 참조 조항 추출
-        #     additional_references = []
-        #     for content_result in law_contents:
-        #         if (
-        #             content_result.get("content", {}).get("success")
-        #             and current_law_name
-        #         ):
-        #             content_text = content_result["content"]["content"].get(
-        #                 "content", ""
-        #             )
-        #             if content_text:
-        #                 # 조문 내용에서 참조 추출
-        #                 content_refs = extract_referenced_articles(
-        #                     content_text, current_law_name
-        #                 )
-        #                 additional_references.extend(content_refs)
+            # 5. 조문 내용에서 추가 참조 조항 추출
+            additional_references = []
+            for content_result in law_contents:
+                if (
+                    content_result.get("content", {}).get("success")
+                    and current_law_name
+                ):
+                    content_text = content_result["content"]["content"].get(
+                        "content", ""
+                    )
+                    if content_text:
+                        # 조문 내용에서 참조 추출
+                        content_refs = extract_referenced_articles(
+                            content_text, current_law_name
+                        )
+                        additional_references.extend(content_refs)
 
-        #     # 중복 제거
-        #     unique_additional_refs = []
-        #     seen_keys = set()
-        #     for ref in additional_references:
-        #         if ref["key"] not in seen_keys:
-        #             unique_additional_refs.append(ref)
-        #             seen_keys.add(ref["key"])
+            # 중복 제거
+            unique_additional_refs = []
+            seen_keys = set()
+            for ref in additional_references:
+                if ref["key"] not in seen_keys:
+                    unique_additional_refs.append(ref)
+                    seen_keys.add(ref["key"])
 
-        #     if unique_additional_refs:
-        #         print(
-        #             f"📋 조문 내용에서 추가 참조 발견: {len(unique_additional_refs)}개"
-        #         )
-        #         for ref in unique_additional_refs:
-        #             print(f"  - {ref['law_name']} 제{ref['article_num']}조")
+            if unique_additional_refs:
+                print(
+                    f"📋 조문 내용에서 추가 참조 발견: {len(unique_additional_refs)}개"
+                )
+                for ref in unique_additional_refs:
+                    print(f"  - {ref['law_name']} 제{ref['article_num']}조")
 
-        #         # 추가 참조 조항을 referenced_laws에 합치기
-        #         referenced_laws.extend(unique_additional_refs)
+                # 추가 참조 조항을 referenced_laws에 합치기
+                referenced_laws.extend(unique_additional_refs)
 
-        #         # 추가 참조 조항의 내용도 가져오기
-        #         additional_contents = await self.law_fetcher.fetch_law_articles_content(
-        #             unique_additional_refs
-        #         )
-        #         law_contents.extend(additional_contents)
+                # 추가 참조 조항의 내용도 가져오기
+                additional_contents = await self.law_fetcher.fetch_law_articles_content(
+                    unique_additional_refs
+                )
+                law_contents.extend(additional_contents)
 
         # 6. RAG용 context 생성 (크롤링+법령 내용)
         rag_context = all_text
@@ -609,8 +636,7 @@ class LawSearchIntegrated:
         direct_laws = results.get("direct_laws", [])
         referenced_laws = results.get("referenced_laws", [])
 
-        # if llm_answer and (direct_laws or referenced_laws):
-        if llm_answer:
+        if llm_answer and (direct_laws or referenced_laws):
             output += "## 🤖 LLM 답변\n\n"
             output += llm_answer.strip() + "\n\n"
         elif llm_answer:
@@ -640,8 +666,8 @@ async def main():
 
     # 법령 사이트에서 검색
     law_domains = searcher.get_law_domains()
-    results = await searcher.crawl_and_extract_laws(user_query, law_domains, 1)
-    # results = await searcher.crawl_and_extract_laws(user_query, None, 10)
+    # results = await searcher.crawl_and_extract_laws(user_query, law_domains, 5)
+    results = await searcher.crawl_and_extract_laws(user_query, None, 5)
 
     # 결과 출력
     formatted_output = searcher.format_results(results)

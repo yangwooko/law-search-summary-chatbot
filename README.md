@@ -5,7 +5,7 @@ Tavily API, 법제처 OpenAPI, OpenAI LLM을 활용하여 법령 관련 정보�
 ## 주요 기능
 
 ### 1. 통합 검색 + LLM 답변 (`law_search_integrated.py`)
-- **Tavily API**로 법령 사이트 검색
+- **Google CSE API** 또는 **Tavily API**로 법령 사이트 검색 (Google CSE 우선)
 - **Crawl4AI**로 검색 결과 URL 크롤링(진행 메시지 억제)
 - **법령명+조문번호 자동 추출** (본문/조문 내 참조까지)
 - **조문 내용 자동 조회** (법제처 OpenAPI)
@@ -33,7 +33,10 @@ uv sync
 `.env` 파일을 생성하고 다음 변수들을 설정하세요:
 
 ```env
-# Tavily API (검색)
+# Google Custom Search Engine (검색, Tavily보다 우선)
+GOOGLE_CSE_API_KEY=your_google_cse_api_key_here
+GOOGLE_CSE_ENGINE_ID=your_google_cse_engine_id_here
+# Tavily API (검색, Google CSE fallback)
 TAVILY_API_KEY=your_tavily_api_key_here
 # 법제처 OpenAPI (조문 내용)
 LAW_API_KEY=your_law_api_key_here
@@ -42,6 +45,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 ```
 
 ### 3. API 키 발급
+- **Google Custom Search Engine**: [Google Cloud Console](https://console.cloud.google.com/)에서 API 키와 검색 엔진 ID 발급
 - **Tavily API**: [Tavily AI](https://tavily.com/)에서 무료 API 키 발급
 - **법제처 OpenAPI**: [국가법령정보센터](https://www.law.go.kr/)에서 OpenAPI 키 발급
 - **OpenAI API**: [OpenAI](https://platform.openai.com/)에서 API 키 발급
